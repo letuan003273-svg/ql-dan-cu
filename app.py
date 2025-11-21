@@ -52,9 +52,18 @@ def get_api_url():
     
     if "api_url" not in st.session_state:
         st.session_state.api_url = ""
+    
+    # Nút để reset URL nếu nhập sai
+    if st.session_state.api_url:
+        with st.sidebar:
+            st.write(f"Đang kết nối tới: `{st.session_state.api_url[:30]}...`")
+            if st.button("Đổi đường dẫn API"):
+                st.session_state.api_url = ""
+                st.rerun()
 
     if not st.session_state.api_url:
         st.info("Lần đầu truy cập, vui lòng nhập Google Apps Script Web App URL.")
+        st.warning("LƯU Ý: Khi Deploy Apps Script, phần 'Who has access' BẮT BUỘC phải là 'Anyone'.")
         url = st.text_input("Dán URL Web App của bạn vào đây:", placeholder="https://script.google.com/macros/s/...")
         if st.button("Lưu cấu hình"):
             if url.startswith("https://script.google.com/"):
@@ -72,42 +81,60 @@ def fetch_data(api_url):
     """Lấy dữ liệu từ Google Sheet và CHUẨN HÓA KIỂU DỮ LIỆU"""
     try:
         response = requests.get(api_url, params={"action": "read"})
-        if response.status_code == 200:
-            df = pd.DataFrame(response.json())
+        
+        # --- KIỂM TRA LỖI KẾT NỐI ---
+        if response.status_code != 200:
+            st.error(f"❌ Lỗi kết nối tới Google Sheet! Mã lỗi HTTP: **{response.status_code}**")
             
-            if not df.empty:
-                # --- QUAN TRỌNG: ÉP KIỂU DỮ LIỆU ĐỂ TRÁNH LỖI STREAMLIT ---
-                
-                # 1. Chuyển cột TT sang số
-                if "TT" in df.columns:
-                    df["TT"] = pd.to_numeric(df["TT"], errors='coerce')
-                
-                # 2. Chuyển các cột Ngày (Date) sang datetime object
-                date_cols = ["Ngày sinh", "Ngày cấp", "Ngày cấp VB"]
-                for col in date_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
-
-                # 3. Chuyển các cột Thời gian (Datetime) sang datetime object
-                datetime_cols = ["Ngày ghi", "Ngày cập nhật"]
-                for col in datetime_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_datetime(df[col], errors='coerce')
-
-                # 4. Chuyển cột Text số (CCCD, SĐT) sang string tuyệt đối
-                # Để tránh Pandas tự nhận diện là int/float gây lỗi cho TextColumn
-                str_cols = ["Số Căn cước", "Số điện thoại", "Mã hộ", "Mã văn bằng", "Mã công việc đang làm"]
-                for col in str_cols:
-                    if col in df.columns:
-                        # Chuyển sang string, thay thế nan/None thành chuỗi rỗng
-                        df[col] = df[col].astype(str).replace(["nan", "None", "<NA>"], "")
-
-            return df
-        else:
-            st.error("Không thể kết nối đến Google Sheet.")
+            if response.status_code == 404:
+                st.info("👉 Nguyên nhân: URL không tồn tại. Vui lòng kiểm tra lại đường dẫn.")
+            elif response.status_code == 403 or response.status_code == 401:
+                st.info("👉 Nguyên nhân: Không có quyền truy cập. Hãy đảm bảo Apps Script được deploy với quyền **'Anyone' (Bất kỳ ai)**.")
+            elif response.status_code == 302:
+                st.info("👉 Nguyên nhân: Bị chuyển hướng đăng nhập. Hãy đảm bảo Apps Script được deploy với quyền **'Anyone'**.")
+            
+            st.expander("Xem chi tiết phản hồi từ Server").code(response.text)
             return pd.DataFrame()
+
+        # Nếu kết nối thành công (200 OK)
+        try:
+            data = response.json()
+        except ValueError:
+            st.error("❌ Dữ liệu trả về không phải JSON hợp lệ.")
+            st.expander("Xem dữ liệu thô").code(response.text)
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        
+        if not df.empty:
+            # --- QUAN TRỌNG: ÉP KIỂU DỮ LIỆU ĐỂ TRÁNH LỖI STREAMLIT ---
+            
+            # 1. Chuyển cột TT sang số
+            if "TT" in df.columns:
+                df["TT"] = pd.to_numeric(df["TT"], errors='coerce')
+            
+            # 2. Chuyển các cột Ngày (Date) sang datetime object
+            date_cols = ["Ngày sinh", "Ngày cấp", "Ngày cấp VB"]
+            for col in date_cols:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+
+            # 3. Chuyển các cột Thời gian (Datetime) sang datetime object
+            datetime_cols = ["Ngày ghi", "Ngày cập nhật"]
+            for col in datetime_cols:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+
+            # 4. Chuyển cột Text số (CCCD, SĐT) sang string tuyệt đối
+            str_cols = ["Số Căn cước", "Số điện thoại", "Mã hộ", "Mã văn bằng", "Mã công việc đang làm"]
+            for col in str_cols:
+                if col in df.columns:
+                    df[col] = df[col].astype(str).replace(["nan", "None", "<NA>"], "")
+
+        return df
+
     except Exception as e:
-        st.error(f"Lỗi kết nối: {e}")
+        st.error(f"❌ Lỗi ngoại lệ khi kết nối: {e}")
         return pd.DataFrame()
 
 def send_data(api_url, data, action="add"):
@@ -127,7 +154,8 @@ def send_data(api_url, data, action="add"):
                 else:
                     st.error(f"Lỗi từ Server: {res_json.get('message')}")
             else:
-                st.error("Lỗi HTTP khi gửi dữ liệu.")
+                st.error(f"Lỗi HTTP khi gửi dữ liệu: {response.status_code}")
+                st.code(response.text)
     except Exception as e:
         st.error(f"Lỗi: {e}")
     return False
@@ -140,10 +168,10 @@ if check_password():
     if api_url:
         st.title(f"📋 {PAGE_TITLE}")
         
-        # Lấy dữ liệu (đã được chuẩn hóa kiểu trong hàm fetch_data)
+        # Lấy dữ liệu
         df = fetch_data(api_url)
         
-        tab1, tab2 = st.tabs(["📝 Nhập liệu mới", "danh sách & Chỉnh sửa"])
+        tab1, tab2 = st.tabs(["📝 Nhập liệu mới", "Danh sách & Chỉnh sửa"])
 
         # --- TAB 1: FORM NHẬP LIỆU ---
         with tab1:
@@ -152,9 +180,7 @@ if check_password():
             # Tính toán số thứ tự tiếp theo
             if not df.empty and "TT" in df.columns:
                 try:
-                    # Do df["TT"] đã là số (nhờ fetch_data xử lý), ta chỉ cần tìm max
                     current_max = df["TT"].max()
-                    # Nếu max là NaN (do dữ liệu rỗng) thì gán bằng 0
                     if pd.isna(current_max):
                         next_tt = 1
                     else:
@@ -311,7 +337,6 @@ if check_password():
                     "Ngày cập nhật": st.column_config.DatetimeColumn("Ngày cập nhật", format="DD/MM/YYYY HH:mm", disabled=True),
                 }
 
-                # Vì đã chuẩn hóa kiểu trong fetch_data, st.data_editor sẽ không còn lỗi
                 edited_df = st.data_editor(
                     df,
                     key="data_editor",
@@ -345,7 +370,6 @@ if check_password():
 
                     # Xử lý Thêm mới (Add) trực tiếp trên bảng
                     for new_row in added_rows:
-                        # Tính TT cho dòng mới thêm từ bảng
                         try:
                             current_max = df["TT"].max()
                             if pd.isna(current_max):
@@ -373,4 +397,4 @@ if check_password():
                         st.info("Không có thay đổi nào để lưu.")
 
             else:
-                st.info("Chưa có dữ liệu hoặc không thể tải dữ liệu.")
+                st.info("Chưa có dữ liệu hoặc không thể tải dữ liệu. Hãy kiểm tra lại URL hoặc cấu hình quyền 'Anyone' trên Google Apps Script.")
