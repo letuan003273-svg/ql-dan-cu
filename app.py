@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, date
 import json
 
 # --- CẤU HÌNH ---
@@ -47,7 +47,6 @@ def check_password():
 
 def get_api_url():
     """Lấy URL API từ Session hoặc User Input"""
-    # Ưu tiên lấy từ Secrets của Streamlit Cloud nếu có
     if "GAS_URL" in st.secrets:
         return st.secrets["GAS_URL"]
     
@@ -67,6 +66,8 @@ def get_api_url():
         return None
     return st.session_state.api_url
 
+# Thêm cache để tăng tốc độ và tránh load lại khi không cần thiết
+@st.cache_data(ttl=60) 
 def fetch_data(api_url):
     """Lấy dữ liệu từ Google Sheet"""
     try:
@@ -91,6 +92,8 @@ def send_data(api_url, data, action="add"):
                 res_json = response.json()
                 if res_json.get("status") == "success":
                     st.toast(res_json.get("message"), icon="✅")
+                    # Xóa cache để lần sau tải lại dữ liệu mới
+                    fetch_data.clear()
                     return True
                 else:
                     st.error(f"Lỗi từ Server: {res_json.get('message')}")
@@ -108,33 +111,49 @@ if check_password():
     if api_url:
         st.title(f"📋 {PAGE_TITLE}")
         
+        # Lấy dữ liệu sớm để tính toán TT
+        df = fetch_data(api_url)
+        
         tab1, tab2 = st.tabs(["📝 Nhập liệu mới", "danh sách & Chỉnh sửa"])
 
         # --- TAB 1: FORM NHẬP LIỆU ---
         with tab1:
             st.markdown("### Nhập thông tin dân cư mới")
             
-            with st.form("entry_form", clear_on_submit=True):
+            # Tính toán số thứ tự tiếp theo
+            if not df.empty and "TT" in df.columns:
+                # Thử chuyển cột TT sang số để tìm max, phòng trường hợp có dữ liệu rác
+                try:
+                    next_tt = int(pd.to_numeric(df["TT"], errors='coerce').max()) + 1
+                except:
+                    next_tt = len(df) + 1
+            else:
+                next_tt = 1
+
+            with st.form("entry_form", clear_on_submit=False): # clear_on_submit=False để giữ lại thông tin nếu nhập sai validation
                 # Tự động lấy thời gian
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
                 # Section 1: Định danh
                 with st.expander("1. Thông tin định danh & Cá nhân", expanded=True):
                     c1, c2, c3, c4 = st.columns(4)
-                    tt = c1.text_input("TT (Số thứ tự)")
+                    # TT tự động điền và disable
+                    tt = c1.text_input("TT (Tự động)", value=str(next_tt), disabled=True)
                     ma_ho = c2.text_input("Mã hộ")
                     ho_ten = c3.text_input("Họ tên")
                     gioi_tinh = c4.selectbox("Giới tính", ["Nam", "Nữ", "Khác"])
                     
                     c5, c6, c7, c8 = st.columns(4)
-                    ngay_sinh = c5.date_input("Ngày sinh", value=None)
-                    so_cccd = c6.text_input("Số Căn cước")
+                    ngay_sinh = c5.date_input("Ngày sinh", value=None, min_value=date(1900, 1, 1))
+                    # Số CCCD: max_chars=12
+                    so_cccd = c6.text_input("Số Căn cước", max_chars=12, help="Nhập đủ 12 số")
                     ngay_cap = c7.date_input("Ngày cấp", value=None)
                     noi_cap = c8.text_input("Nơi cấp")
                     
                     c9, c10 = st.columns(2)
                     dan_toc = c9.text_input("Dân tộc", value="Kinh")
-                    sdt = c10.text_input("Số điện thoại")
+                    # SĐT: max_chars=10
+                    sdt = c10.text_input("Số điện thoại", max_chars=10, help="Nhập đủ 10 số")
 
                 # Section 2: Cư trú & Xã hội
                 with st.expander("2. Cư trú & Chính sách xã hội"):
@@ -199,65 +218,91 @@ if check_password():
                 submitted = st.form_submit_button("Lưu dữ liệu", type="primary")
                 
                 if submitted:
-                    # Gom dữ liệu
-                    form_data = {
-                        "TT": tt, "Mã hộ": ma_ho, "Họ tên": ho_ten, "Giới tính": gioi_tinh,
-                        "Ngày sinh": str(ngay_sinh) if ngay_sinh else "",
-                        "Số Căn cước": so_cccd,
-                        "Ngày cấp": str(ngay_cap) if ngay_cap else "",
-                        "Nơi cấp": noi_cap, "Dân tộc": dan_toc, "Số điện thoại": sdt,
-                        "Nơi đăng ký thường trú": thuong_tru, "Nơi ở hiện tại": hien_tai,
-                        "Thuộc hộ nghèo - cận nghèo": ho_ngheo,
-                        "Người khuyết tật": "Có" if khuyet_tat else "Không",
-                        "Dân tộc thiểu số": "Có" if dtts else "Không",
-                        "Trình độ giáo dục phổ thông": gdpt, "Trình độ chuyên môn kinh tế": cmkt,
-                        "Lĩnh vực giáo dục đào tạo": linh_vuc, "Mã văn bằng": ma_vb,
-                        "Ngày cấp VB": str(ngay_cap_vb) if ngay_cap_vb else "",
-                        "Đơn vị cấp VB": don_vi_cap, "Có việc làm": co_viec,
-                        "Vị thế việc làm": vi_the, "Mã công việc đang làm": ma_cv,
-                        "Tên công việc đang làm": ten_cv, "Thuộc khu vực": khu_vuc,
-                        "Tên nhóm ngành kinh tế": nhom_nganh, "Nơi làm việc": noi_lam,
-                        "Địa chỉ nơi làm": dc_lam, "Địa chỉ chổ làm": dc_cho_lam,
-                        "Loại hình kinh tế": loai_hinh,
-                        "Thất nghiệp": "Có" if that_nghiep else "Không",
-                        "Thời gian thất nghiệp": tg_that_nghiep,
-                        "Nhu cầu đào tạo": nhu_cau_dt, "Nhu cầu việc làm": nhu_cau_vl,
-                        "Không tham gia hoạt động kinh tế": "Có" if kt_kt else "Không",
-                        "Nguyên nhân không tham gia hoạt động kinh tế": nguyen_nhan_kt,
-                        "Diễn giải công việc": dien_giai,
-                        "Ngày ghi": now_str, "Ngày cập nhật": now_str
-                    }
+                    # --- VALIDATION LOGIC ---
+                    errors = []
                     
-                    if send_data(api_url, form_data, action="add"):
-                        st.success("Đã thêm dữ liệu thành công!")
+                    # Validate CCCD
+                    if so_cccd and (len(so_cccd) != 12 or not so_cccd.isdigit()):
+                        errors.append("⚠️ Số Căn cước phải bao gồm chính xác 12 chữ số.")
+                    
+                    # Validate SDT
+                    if sdt and (len(sdt) != 10 or not sdt.isdigit()):
+                        errors.append("⚠️ Số điện thoại phải bao gồm chính xác 10 chữ số.")
+
+                    if errors:
+                        for err in errors:
+                            st.error(err)
+                    else:
+                        # Nếu không có lỗi thì mới gửi dữ liệu
+                        # Gom dữ liệu
+                        form_data = {
+                            "TT": tt, "Mã hộ": ma_ho, "Họ tên": ho_ten, "Giới tính": gioi_tinh,
+                            "Ngày sinh": str(ngay_sinh) if ngay_sinh else "",
+                            "Số Căn cước": so_cccd,
+                            "Ngày cấp": str(ngay_cap) if ngay_cap else "",
+                            "Nơi cấp": noi_cap, "Dân tộc": dan_toc, "Số điện thoại": sdt,
+                            "Nơi đăng ký thường trú": thuong_tru, "Nơi ở hiện tại": hien_tai,
+                            "Thuộc hộ nghèo - cận nghèo": ho_ngheo,
+                            "Người khuyết tật": "Có" if khuyet_tat else "Không",
+                            "Dân tộc thiểu số": "Có" if dtts else "Không",
+                            "Trình độ giáo dục phổ thông": gdpt, "Trình độ chuyên môn kinh tế": cmkt,
+                            "Lĩnh vực giáo dục đào tạo": linh_vuc, "Mã văn bằng": ma_vb,
+                            "Ngày cấp VB": str(ngay_cap_vb) if ngay_cap_vb else "",
+                            "Đơn vị cấp VB": don_vi_cap, "Có việc làm": co_viec,
+                            "Vị thế việc làm": vi_the, "Mã công việc đang làm": ma_cv,
+                            "Tên công việc đang làm": ten_cv, "Thuộc khu vực": khu_vuc,
+                            "Tên nhóm ngành kinh tế": nhom_nganh, "Nơi làm việc": noi_lam,
+                            "Địa chỉ nơi làm": dc_lam, "Địa chỉ chổ làm": dc_cho_lam,
+                            "Loại hình kinh tế": loai_hinh,
+                            "Thất nghiệp": "Có" if that_nghiep else "Không",
+                            "Thời gian thất nghiệp": tg_that_nghiep,
+                            "Nhu cầu đào tạo": nhu_cau_dt, "Nhu cầu việc làm": nhu_cau_vl,
+                            "Không tham gia hoạt động kinh tế": "Có" if kt_kt else "Không",
+                            "Nguyên nhân không tham gia hoạt động kinh tế": nguyen_nhan_kt,
+                            "Diễn giải công việc": dien_giai,
+                            "Ngày ghi": now_str, "Ngày cập nhật": now_str
+                        }
+                        
+                        if send_data(api_url, form_data, action="add"):
+                            st.success("Đã thêm dữ liệu thành công!")
+                            st.rerun()
 
         # --- TAB 2: XEM & SỬA DỮ LIỆU ---
         with tab2:
             st.markdown("### Cơ sở dữ liệu dân cư")
             if st.button("🔄 Tải lại dữ liệu"):
-                st.cache_data.clear()
+                fetch_data.clear()
+                st.rerun()
             
-            # Load data
-            df = fetch_data(api_url)
-            
+            # DF đã được fetch ở đầu script
             if not df.empty:
-                # Ẩn cột kỹ thuật _row_index khi hiển thị nhưng giữ lại để update
+                # Ẩn cột kỹ thuật _row_index khi hiển thị
                 display_cols = [c for c in df.columns if c != "_row_index"]
                 
+                # Cấu hình hiển thị cột
+                column_config = {
+                    "TT": st.column_config.NumberColumn("TT", format="%d"),
+                    "Số Căn cước": st.column_config.TextColumn("Số Căn cước", help="12 chữ số", validate="^[0-9]{12}$"),
+                    "Số điện thoại": st.column_config.TextColumn("Số điện thoại", help="10 chữ số", validate="^[0-9]{10}$"),
+                    "Ngày sinh": st.column_config.DateColumn("Ngày sinh", format="DD/MM/YYYY"),
+                    "Ngày cấp": st.column_config.DateColumn("Ngày cấp", format="DD/MM/YYYY"),
+                    "Ngày cấp VB": st.column_config.DateColumn("Ngày cấp VB", format="DD/MM/YYYY"),
+                    "Ngày ghi": st.column_config.DatetimeColumn("Ngày ghi", format="DD/MM/YYYY HH:mm", disabled=True),
+                    "Ngày cập nhật": st.column_config.DatetimeColumn("Ngày cập nhật", format="DD/MM/YYYY HH:mm", disabled=True),
+                }
+
                 # Hiển thị Data Editor
                 edited_df = st.data_editor(
                     df,
                     key="data_editor",
                     num_rows="dynamic",
                     column_order=display_cols,
+                    column_config=column_config,
                     height=600
                 )
                 
                 # Nút Lưu thay đổi
                 if st.button("Lưu các thay đổi đã chỉnh sửa", type="primary"):
-                    # Tìm các dòng bị thay đổi
-                    # Logic: So sánh edited_df và df gốc, hoặc dùng st.session_state["data_editor"]
-                    # Để đơn giản và chính xác, ta xử lý các dòng đã bị edit trong session state
                     changes = st.session_state["data_editor"]["edited_rows"]
                     added_rows = st.session_state["data_editor"]["added_rows"]
                     
@@ -269,11 +314,8 @@ if check_password():
 
                     # Xử lý Sửa (Update)
                     for idx, change_dict in changes.items():
-                        # Lấy _row_index từ dataframe gốc tại vị trí idx
-                        # Lưu ý: index trong editor tương ứng với index trong df gốc
                         row_index_in_sheet = df.iloc[int(idx)]["_row_index"]
                         
-                        # Chuẩn bị data update
                         update_payload = change_dict.copy()
                         update_payload["_row_index"] = int(row_index_in_sheet)
                         update_payload["Ngày cập nhật"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -282,8 +324,18 @@ if check_password():
                         current_step += 1
                         my_bar.progress(current_step / total_changes if total_changes > 0 else 100, text=f"Đã cập nhật dòng {row_index_in_sheet}")
 
-                    # Xử lý Thêm mới (Add) trực tiếp trên bảng (nếu có)
+                    # Xử lý Thêm mới (Add) trực tiếp trên bảng
                     for new_row in added_rows:
+                        # Tự động tính TT cho dòng thêm trực tiếp trên bảng
+                        # Lưu ý: Logic này đơn giản, nếu thêm nhiều dòng cùng lúc có thể trùng TT nếu không reload
+                        try:
+                            current_max_tt = int(pd.to_numeric(df["TT"], errors='coerce').max())
+                        except:
+                            current_max_tt = len(df)
+                        
+                        if "TT" not in new_row or not new_row["TT"]:
+                            new_row["TT"] = current_max_tt + 1 + current_step # Tăng dần cho các dòng thêm mới
+                            
                         new_row["Ngày ghi"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         new_row["Ngày cập nhật"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         send_data(api_url, new_row, action="add")
@@ -293,6 +345,7 @@ if check_password():
                     my_bar.empty()
                     if total_changes > 0:
                         st.success("Đã hoàn tất cập nhật!")
+                        fetch_data.clear() # Xóa cache
                         st.rerun()
                     else:
                         st.info("Không có thay đổi nào để lưu.")
