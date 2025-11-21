@@ -188,7 +188,7 @@ if check_password():
                     gioi_tinh = c4.selectbox("Giới tính", ["Nam", "Nữ", "Khác"])
                     
                     c5, c6, c7, c8 = st.columns(4)
-                    ngay_sinh = c5.date_input("Ngày sinh", value=None, min_value=datetime(1, 1, 1900))
+                    ngay_sinh = c5.date_input("Ngày sinh", value=None, min_value=datetime(1900, 1, 1))
                     so_cccd = c6.text_input("Số Căn cước", max_chars=12, help="Nhập đủ 12 số")
                     ngay_cap = c7.date_input("Ngày cấp", value=None)
                     noi_cap = c8.text_input("Nơi cấp")
