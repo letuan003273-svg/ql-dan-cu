@@ -69,11 +69,40 @@ def get_api_url():
 # Thêm cache để tăng tốc độ và tránh load lại khi không cần thiết
 @st.cache_data(ttl=60) 
 def fetch_data(api_url):
-    """Lấy dữ liệu từ Google Sheet"""
+    """Lấy dữ liệu từ Google Sheet và CHUẨN HÓA KIỂU DỮ LIỆU"""
     try:
         response = requests.get(api_url, params={"action": "read"})
         if response.status_code == 200:
-            return pd.DataFrame(response.json())
+            df = pd.DataFrame(response.json())
+            
+            if not df.empty:
+                # --- QUAN TRỌNG: ÉP KIỂU DỮ LIỆU ĐỂ TRÁNH LỖI STREAMLIT ---
+                
+                # 1. Chuyển cột TT sang số
+                if "TT" in df.columns:
+                    df["TT"] = pd.to_numeric(df["TT"], errors='coerce')
+                
+                # 2. Chuyển các cột Ngày (Date) sang datetime object
+                date_cols = ["Ngày sinh", "Ngày cấp", "Ngày cấp VB"]
+                for col in date_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+
+                # 3. Chuyển các cột Thời gian (Datetime) sang datetime object
+                datetime_cols = ["Ngày ghi", "Ngày cập nhật"]
+                for col in datetime_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+
+                # 4. Chuyển cột Text số (CCCD, SĐT) sang string tuyệt đối
+                # Để tránh Pandas tự nhận diện là int/float gây lỗi cho TextColumn
+                str_cols = ["Số Căn cước", "Số điện thoại", "Mã hộ", "Mã văn bằng", "Mã công việc đang làm"]
+                for col in str_cols:
+                    if col in df.columns:
+                        # Chuyển sang string, thay thế nan/None thành chuỗi rỗng
+                        df[col] = df[col].astype(str).replace(["nan", "None", "<NA>"], "")
+
+            return df
         else:
             st.error("Không thể kết nối đến Google Sheet.")
             return pd.DataFrame()
@@ -111,7 +140,7 @@ if check_password():
     if api_url:
         st.title(f"📋 {PAGE_TITLE}")
         
-        # Lấy dữ liệu sớm để tính toán TT
+        # Lấy dữ liệu (đã được chuẩn hóa kiểu trong hàm fetch_data)
         df = fetch_data(api_url)
         
         tab1, tab2 = st.tabs(["📝 Nhập liệu mới", "danh sách & Chỉnh sửa"])
@@ -122,22 +151,25 @@ if check_password():
             
             # Tính toán số thứ tự tiếp theo
             if not df.empty and "TT" in df.columns:
-                # Thử chuyển cột TT sang số để tìm max, phòng trường hợp có dữ liệu rác
                 try:
-                    next_tt = int(pd.to_numeric(df["TT"], errors='coerce').max()) + 1
+                    # Do df["TT"] đã là số (nhờ fetch_data xử lý), ta chỉ cần tìm max
+                    current_max = df["TT"].max()
+                    # Nếu max là NaN (do dữ liệu rỗng) thì gán bằng 0
+                    if pd.isna(current_max):
+                        next_tt = 1
+                    else:
+                        next_tt = int(current_max) + 1
                 except:
                     next_tt = len(df) + 1
             else:
                 next_tt = 1
 
-            with st.form("entry_form", clear_on_submit=False): # clear_on_submit=False để giữ lại thông tin nếu nhập sai validation
-                # Tự động lấy thời gian
+            with st.form("entry_form", clear_on_submit=False):
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
                 # Section 1: Định danh
                 with st.expander("1. Thông tin định danh & Cá nhân", expanded=True):
                     c1, c2, c3, c4 = st.columns(4)
-                    # TT tự động điền và disable
                     tt = c1.text_input("TT (Tự động)", value=str(next_tt), disabled=True)
                     ma_ho = c2.text_input("Mã hộ")
                     ho_ten = c3.text_input("Họ tên")
@@ -145,14 +177,12 @@ if check_password():
                     
                     c5, c6, c7, c8 = st.columns(4)
                     ngay_sinh = c5.date_input("Ngày sinh", value=None, min_value=date(1900, 1, 1))
-                    # Số CCCD: max_chars=12
                     so_cccd = c6.text_input("Số Căn cước", max_chars=12, help="Nhập đủ 12 số")
                     ngay_cap = c7.date_input("Ngày cấp", value=None)
                     noi_cap = c8.text_input("Nơi cấp")
                     
                     c9, c10 = st.columns(2)
                     dan_toc = c9.text_input("Dân tộc", value="Kinh")
-                    # SĐT: max_chars=10
                     sdt = c10.text_input("Số điện thoại", max_chars=10, help="Nhập đủ 10 số")
 
                 # Section 2: Cư trú & Xã hội
@@ -218,14 +248,9 @@ if check_password():
                 submitted = st.form_submit_button("Lưu dữ liệu", type="primary")
                 
                 if submitted:
-                    # --- VALIDATION LOGIC ---
                     errors = []
-                    
-                    # Validate CCCD
                     if so_cccd and (len(so_cccd) != 12 or not so_cccd.isdigit()):
                         errors.append("⚠️ Số Căn cước phải bao gồm chính xác 12 chữ số.")
-                    
-                    # Validate SDT
                     if sdt and (len(sdt) != 10 or not sdt.isdigit()):
                         errors.append("⚠️ Số điện thoại phải bao gồm chính xác 10 chữ số.")
 
@@ -233,8 +258,6 @@ if check_password():
                         for err in errors:
                             st.error(err)
                     else:
-                        # Nếu không có lỗi thì mới gửi dữ liệu
-                        # Gom dữ liệu
                         form_data = {
                             "TT": tt, "Mã hộ": ma_ho, "Họ tên": ho_ten, "Giới tính": gioi_tinh,
                             "Ngày sinh": str(ngay_sinh) if ngay_sinh else "",
@@ -274,12 +297,9 @@ if check_password():
                 fetch_data.clear()
                 st.rerun()
             
-            # DF đã được fetch ở đầu script
             if not df.empty:
-                # Ẩn cột kỹ thuật _row_index khi hiển thị
                 display_cols = [c for c in df.columns if c != "_row_index"]
                 
-                # Cấu hình hiển thị cột
                 column_config = {
                     "TT": st.column_config.NumberColumn("TT", format="%d"),
                     "Số Căn cước": st.column_config.TextColumn("Số Căn cước", help="12 chữ số", validate="^[0-9]{12}$"),
@@ -291,7 +311,7 @@ if check_password():
                     "Ngày cập nhật": st.column_config.DatetimeColumn("Ngày cập nhật", format="DD/MM/YYYY HH:mm", disabled=True),
                 }
 
-                # Hiển thị Data Editor
+                # Vì đã chuẩn hóa kiểu trong fetch_data, st.data_editor sẽ không còn lỗi
                 edited_df = st.data_editor(
                     df,
                     key="data_editor",
@@ -301,7 +321,6 @@ if check_password():
                     height=600
                 )
                 
-                # Nút Lưu thay đổi
                 if st.button("Lưu các thay đổi đã chỉnh sửa", type="primary"):
                     changes = st.session_state["data_editor"]["edited_rows"]
                     added_rows = st.session_state["data_editor"]["added_rows"]
@@ -326,15 +345,18 @@ if check_password():
 
                     # Xử lý Thêm mới (Add) trực tiếp trên bảng
                     for new_row in added_rows:
-                        # Tự động tính TT cho dòng thêm trực tiếp trên bảng
-                        # Lưu ý: Logic này đơn giản, nếu thêm nhiều dòng cùng lúc có thể trùng TT nếu không reload
+                        # Tính TT cho dòng mới thêm từ bảng
                         try:
-                            current_max_tt = int(pd.to_numeric(df["TT"], errors='coerce').max())
+                            current_max = df["TT"].max()
+                            if pd.isna(current_max):
+                                current_max_tt = 0
+                            else:
+                                current_max_tt = int(current_max)
                         except:
                             current_max_tt = len(df)
                         
                         if "TT" not in new_row or not new_row["TT"]:
-                            new_row["TT"] = current_max_tt + 1 + current_step # Tăng dần cho các dòng thêm mới
+                            new_row["TT"] = current_max_tt + 1 + current_step 
                             
                         new_row["Ngày ghi"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         new_row["Ngày cập nhật"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -345,7 +367,7 @@ if check_password():
                     my_bar.empty()
                     if total_changes > 0:
                         st.success("Đã hoàn tất cập nhật!")
-                        fetch_data.clear() # Xóa cache
+                        fetch_data.clear()
                         st.rerun()
                     else:
                         st.info("Không có thay đổi nào để lưu.")
