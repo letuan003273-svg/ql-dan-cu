@@ -75,7 +75,7 @@ def get_api_url():
         return None
     return st.session_state.api_url
 
-# Thêm cache để tăng tốc độ và tránh load lại khi không cần thiết
+# Thêm cache để tăng tốc độ
 @st.cache_data(ttl=60) 
 def fetch_data(api_url):
     """Lấy dữ liệu từ Google Sheet và CHUẨN HÓA KIỂU DỮ LIỆU"""
@@ -85,47 +85,38 @@ def fetch_data(api_url):
         # --- KIỂM TRA LỖI KẾT NỐI ---
         if response.status_code != 200:
             st.error(f"❌ Lỗi kết nối tới Google Sheet! Mã lỗi HTTP: **{response.status_code}**")
-            
             if response.status_code == 404:
-                st.info("👉 Nguyên nhân: URL không tồn tại. Vui lòng kiểm tra lại đường dẫn.")
-            elif response.status_code == 403 or response.status_code == 401:
-                st.info("👉 Nguyên nhân: Không có quyền truy cập. Hãy đảm bảo Apps Script được deploy với quyền **'Anyone' (Bất kỳ ai)**.")
-            elif response.status_code == 302:
-                st.info("👉 Nguyên nhân: Bị chuyển hướng đăng nhập. Hãy đảm bảo Apps Script được deploy với quyền **'Anyone'**.")
-            
-            st.expander("Xem chi tiết phản hồi từ Server").code(response.text)
+                st.info("👉 Nguyên nhân: URL không tồn tại.")
+            elif response.status_code in [401, 403]:
+                st.info("👉 Nguyên nhân: Thiếu quyền truy cập (Chưa chọn 'Anyone').")
             return pd.DataFrame()
 
-        # Nếu kết nối thành công (200 OK)
         try:
             data = response.json()
         except ValueError:
             st.error("❌ Dữ liệu trả về không phải JSON hợp lệ.")
-            st.expander("Xem dữ liệu thô").code(response.text)
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
         
         if not df.empty:
-            # --- QUAN TRỌNG: ÉP KIỂU DỮ LIỆU ĐỂ TRÁNH LỖI STREAMLIT ---
-            
             # 1. Chuyển cột TT sang số
             if "TT" in df.columns:
                 df["TT"] = pd.to_numeric(df["TT"], errors='coerce')
             
-            # 2. Chuyển các cột Ngày (Date) sang datetime object
-            date_cols = ["Ngày sinh", "Ngày cấp", "Ngày cấp VB"]
-            for col in date_cols:
+            # 2. Xử lý cột Ngày & Giờ (Fix lỗi tz-aware vs tz-naive)
+            # Chiến lược: Convert tất cả sang UTC (utc=True) để đồng bộ, 
+            # sau đó xóa múi giờ (.dt.tz_localize(None)) để thành naive datetime.
+            
+            all_date_cols = ["Ngày sinh", "Ngày cấp", "Ngày cấp VB", "Ngày ghi", "Ngày cập nhật"]
+            for col in all_date_cols:
                 if col in df.columns:
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                    # Ép kiểu sang datetime với utc=True để tránh lỗi mixed timezone
+                    df[col] = pd.to_datetime(df[col], errors='coerce', utc=True)
+                    # Xóa thông tin múi giờ để thành naive datetime (tương thích với st.data_editor)
+                    df[col] = df[col].dt.tz_localize(None)
 
-            # 3. Chuyển các cột Thời gian (Datetime) sang datetime object
-            datetime_cols = ["Ngày ghi", "Ngày cập nhật"]
-            for col in datetime_cols:
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col], errors='coerce')
-
-            # 4. Chuyển cột Text số (CCCD, SĐT) sang string tuyệt đối
+            # 3. Chuyển cột Text số (CCCD, SĐT) sang string tuyệt đối
             str_cols = ["Số Căn cước", "Số điện thoại", "Mã hộ", "Mã văn bằng", "Mã công việc đang làm"]
             for col in str_cols:
                 if col in df.columns:
@@ -148,14 +139,12 @@ def send_data(api_url, data, action="add"):
                 res_json = response.json()
                 if res_json.get("status") == "success":
                     st.toast(res_json.get("message"), icon="✅")
-                    # Xóa cache để lần sau tải lại dữ liệu mới
                     fetch_data.clear()
                     return True
                 else:
                     st.error(f"Lỗi từ Server: {res_json.get('message')}")
             else:
                 st.error(f"Lỗi HTTP khi gửi dữ liệu: {response.status_code}")
-                st.code(response.text)
     except Exception as e:
         st.error(f"Lỗi: {e}")
     return False
@@ -181,10 +170,7 @@ if check_password():
             if not df.empty and "TT" in df.columns:
                 try:
                     current_max = df["TT"].max()
-                    if pd.isna(current_max):
-                        next_tt = 1
-                    else:
-                        next_tt = int(current_max) + 1
+                    next_tt = 1 if pd.isna(current_max) else int(current_max) + 1
                 except:
                     next_tt = len(df) + 1
             else:
@@ -372,15 +358,12 @@ if check_password():
                     for new_row in added_rows:
                         try:
                             current_max = df["TT"].max()
-                            if pd.isna(current_max):
-                                current_max_tt = 0
-                            else:
-                                current_max_tt = int(current_max)
+                            next_tt = 1 if pd.isna(current_max) else int(current_max) + 1 + current_step
                         except:
-                            current_max_tt = len(df)
+                            next_tt = len(df) + 1 + current_step
                         
                         if "TT" not in new_row or not new_row["TT"]:
-                            new_row["TT"] = current_max_tt + 1 + current_step 
+                            new_row["TT"] = next_tt
                             
                         new_row["Ngày ghi"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         new_row["Ngày cập nhật"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -395,6 +378,5 @@ if check_password():
                         st.rerun()
                     else:
                         st.info("Không có thay đổi nào để lưu.")
-
             else:
-                st.info("Chưa có dữ liệu hoặc không thể tải dữ liệu. Hãy kiểm tra lại URL hoặc cấu hình quyền 'Anyone' trên Google Apps Script.")
+                st.info("Chưa có dữ liệu. Vui lòng nhập liệu hoặc kiểm tra URL.")
